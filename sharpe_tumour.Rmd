@@ -1,0 +1,211 @@
+---
+title: "Sharpe lab - Tumour RNASeq"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_depth: 4
+    fig_caption: true
+    fig_width: 8
+    fig_height: 6
+author: "Meeta Mistry"
+---
+
+```{r setup, echo=FALSE}
+ 
+# Setup report details
+clientname="Vikram Juneja"
+clientemail="vikram.juneja@gmail.com "
+lablocation="Sharpe Lab- HMS"
+analystname="Meeta Mistry"
+analystemail="mmistry@hsph.harvard.edu"
+```
+
+RNA-Seq analysis for `r clientname` (`r clientemail`) at `r lablocation`. Contact `r analystname` (`r analystemail`) for additional details. Request from client was:     
+
+Looking at PD1-sensitive (MC38) versus PD1-insensitive (B16): What pathways may compensate for the loss of PD-1/PD-L1 signaling in PD-1 -/- mice? What pathways do PD-1 insensitive tumor cells take advantage of?                                                 
+
+  * Group 1: WT versus PD-1-/- (MC38) (triplicate)
+  * Group 2: WT versus PD-1-/- (B16) (triplicate)
+  * Group 3: MC38 in vitro (triplicate)
+  * Group 4: B16 in vitro (triplicate)
+  
+  
+```{r workflow, fig.align='center', echo=FALSE, warning=FALSE, message=FALSE}
+require(png)
+img <- readPNG("additional files/workflow.png")
+grid.raster(img)
+```
+
+## Workflow:   
+  * run fastq files through [bcbio](https://bcbio-nextgen.readthedocs.org/en/latest/index.html) on Orchestra
+  * assess QC [report link](./qc-summary/qc-summary.html)
+  * simple DEG list for the WT and KO comparison within each cell line
+
+## Setup
+### Bioconductor and R libraries used
+
+```{r libraries, echo=TRUE}
+loadlibs <- function(){
+library(ggplot2)
+library(reshape)
+library(gplots)
+library(RColorBrewer)
+library(CHBUtils)
+library(ggdendro)
+library(grid)
+library(gridExtra)
+library(limma)
+library(DESeq2)
+library(Biobase)
+library(genefilter)
+library(splitstackshape)
+library(GOstats)
+}
+suppressPackageStartupMessages(loadlibs())
+```
+
+### Set variables
+```{r directories, echo=TRUE}
+baseDir=getwd()
+dataDir=paste(baseDir, "/data", sep="")
+resultsDir=paste(baseDir, "/results", sep="")
+metaDir=paste(baseDir, "/meta", sep="")
+
+heatcolors.1 <- rev(brewer.pal(6, "YlOrRd"))
+heatcolors.2 <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+cbPalette <- cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                            "#D55E00", "#CC79A7", "#000000")
+```
+  
+## RNA-Seq
+### Load data
+
+```{r loadcounts}
+data <- read.delim(file.path(dataDir, 'combined.counts'), header=T, sep="\t", row.names=1, as.is=T) 
+meta <- read.delim(file.path(metaDir, 'project2.csv'), header=T, sep=",", row.names=1)
+meta$sampletype <- factor(paste(meta$celline, "_", meta$genotype, sep=""))
+shortname = sapply(row.names(meta), function(x){
+                  s <- unlist(strsplit(x, "_"))
+                  newname <- paste(s[5], "_", s[6], sep="")}, USE.NAMES=F)
+meta$shortname <-shortname
+
+# Reorder data to match meta
+ord.names <- sapply(rownames(meta), function(x){
+                            s <- strsplit(x, ".", fixed=T)[[1]][1] 
+                            grep(s, colnames(data))})
+
+data <- data[,as.numeric(ord.names)]
+colnames(data) <- row.names(meta)
+
+# Create eset object
+eset <- new("ExpressionSet", exprs=as.matrix(data))
+pData(eset) <- meta
+annot <- read.delim(file.path(dataDir, 'annotated_combined.counts'), sep="\t", header=T, row.names=1)
+fData(eset) <- data.frame(symbol=annot$symbol, row.names=row.names(annot), stringsAsFactors = FALSE)
+```
+  
+### Quality control
+From the PCA, samples separate into four distinct group which corresponds to each cell line in vitro and exvivo. The KO and WT do not separate out, but they do tend to cluster together
+
+```{r qcseq, echo=FALSE, fig.align='center', fig.width=22, warning=FALSE, message=FALSE}
+# PCA plot of first and second PCs
+dge <- DGEList(counts=data)
+dge <- calcNormFactors(dge)
+normalized_counts = cpm(dge, normalized.lib.sizes=TRUE)
+colnames(normalized_counts) <- meta$shortname
+p1 <- mds(normalized_counts, condition=pData(eset)$sampletype, k=length(colnames(data)) - 1)
+
+# Dendrogram
+  meta.x <- meta
+  row.names(meta.x) <- colnames(counts)
+  myDist <- dist(t(normalized_counts))
+  myTree <-hclust(myDist)
+  dhc <- as.dendrogram(myTree)
+  ddata <- dendro_data(dhc, type="rectangle")
+  ddata$labels <- merge(ddata$labels, meta.x, by.x="label", by.y="row.names")
+p2 <- ggplot(segment(ddata)) +
+    geom_segment(aes(x=x, y=y, xend=xend, yend=yend)) +
+    theme_dendro() +
+    geom_text(data=label(ddata), aes(x=x, y=y, label=label, color= label(ddata)[['sampletype']], 
+                                     hjust=-0.1), size=4) +
+    coord_flip() + scale_y_reverse(expand=c(0.2, 50)) +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank(),
+          legend.title=element_blank())
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+## DESeq2: Finding genes differentially expressed between WT and KO
+
+Starting from count data; create a DESeq object. The design formula (~) is used to estimate the dispersions and to estimate the log2 fold changes of the model. DESeq2 will estimate the library sizes with "estimateSizeFactors". However, this can only take into account tags that have contributed to your cluster definitions (genes). Imagine that none of your clusters are differentially expressed, but due to some biological or technical artifact, the reads that do not map to clusters are more abundant in one than in the other sample. A normalization based on all counts will skew the clusters in order to account for the non-clusters. Finally, There are three levels of filtering applied in DESeq2.
+
+1. If within a row, all samples have zero counts, the baseMean column will be zero, and the log2 fold change estimates, p-value and adjusted p-value will all be set to NA.
+2. If a row contains a sample with an extreme count outlier then the p-value and adjusted p-value are set to NA. These outlier counts are detected by [Cook’s distance](http://en.wikipedia.org/wiki/Cook%27s_distance)
+3. If a row is filtered by automatic independent filtering, based on low mean normalized count, then only the adjusted p-value is set to NA. 
+
+```{r deseq2-setup, fig.width=20, warning=FALSE, message=FALSE}
+
+# Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(countData = exprs(eset), colData = pData(eset), design = ~ sampletype)
+dds <- DESeq(dds)
+
+# Matrix of pseudocounts for downstream visualization: two methods
+rld <- rlog(dds)
+
+# Extract data of specified contrasts for B16
+# resultNames(dds) # uncomment to check names for contrast setup
+contrast <- list("sampletypeB16.GFP_KO", "sampletypeB16.GFP_WT")
+resB16 <- results(dds, contrast=contrast)
+
+# Extract data of specified contrast for MC38 cells
+contrast <- list("sampletypeMC38.GFP_KO", "sampletypeMC38.GFP_WT")
+resMC38 <- results(dds, contrast=contrast)
+
+
+# Plot p-value distributions
+df <- data.frame(resB16[4:39017,])
+p1 <- ggplot(df, aes(x=pvalue)) + geom_histogram(binwidth=.05) +
+      scale_x_continuous(limits=c(0,1)) +
+      ggtitle("B16 cells") +
+    theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) 
+
+df <- data.frame(resMC38[4:39017,])
+p2 <- ggplot(df, aes(x=pvalue)) + geom_histogram(binwidth=.05) +
+      scale_x_continuous(limits=c(0,1)) +
+      ggtitle("MC38 cells") +
+    theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) 
+
+grid.arrange(p1, p2, ncol=2)
+
+```
+
+## Significant genes
+The p-value distributions indicate that there is probabaly little to no DE with the B16 cells (based on the almost uniform distribution), but there might be something in the MC38 comparison. Significant genes were identified from each comaprison using the threshold of padj < 0.05 and an absolute FC > 2. For B16 cells only four genes passed this threshold, and for MC38 cells no significant genes were found. A less stringent alternative is to see how many genes are found using the adjusted p-value criteria on its own (p < 0.05). With this we find 8 genes differntially expressed in B16 cells and 489 genes in the MC38 cells.
+
+The following genes lists resulted with no overlap between the two. Gene lists are provided in the links below with Ensembl ID, Gene symbol and RPKM values in each sample.                            
+
+  * Group 1: [B16 comparison](./results/resultsB16)  
+  * Group 2: [MC38 comparison](./results/resultsMC38)
+
+```{r siggenes, fig.align='center', echo=FALSE}
+# Get significant genes from each comparison
+resultsAll <- list(resB16, resMC38)
+p.cutoff <- 0.05
+fc <- 2
+sigmat <- lapply(resultsAll, function(x){
+            getGenes <- data.frame(x[4:39017,])
+            getGenes <- getGenes[which(getGenes$baseMean > 0),]
+            gene.FDR <- row.names(getGenes)[which(getGenes$padj < p.cutoff)]
+            return(gene.FDR)})
+
+```
