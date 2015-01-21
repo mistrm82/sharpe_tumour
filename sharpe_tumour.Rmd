@@ -222,12 +222,13 @@ write.table(out, "results/reusltsMC38.csv", sep=",", quote=F)
 
 ```
 
-```{r B16-table, echo=FALSE, fig.align='center'}
+#### B16
+```{r B16-table, echo=FALSE, fig.align='center', results='asis'}
 
 out <- data.frame(resB16[sigmat[[1]],])
 an.out <- match(sigmat[[1]], row.names(annot))
 out <- cbind(annot$symbol[an.out], out)
 colnames(out)[1] <- "geneSymbol"
-kable(out, format='html')
+kable(out, format='markdown')
 ```
 
