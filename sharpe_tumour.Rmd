@@ -33,6 +33,7 @@ Looking at PD1-sensitive (MC38) versus PD1-insensitive (B16): What pathways may 
   
 ```{r workflow, fig.align='center', echo=FALSE, warning=FALSE, message=FALSE}
 require(png)
+require(gridExtra)
 img <- readPNG("additional files/workflow.png")
 grid.raster(img)
 ```
@@ -61,6 +62,8 @@ library(Biobase)
 library(genefilter)
 library(splitstackshape)
 library(GOstats)
+library(edgeR)
+library(CHBUtils)
 }
 suppressPackageStartupMessages(loadlibs())
 ```
@@ -123,7 +126,7 @@ p1 <- mds(normalized_counts, condition=pData(eset)$sampletype, k=length(colnames
   myTree <-hclust(myDist)
   dhc <- as.dendrogram(myTree)
   ddata <- dendro_data(dhc, type="rectangle")
-  ddata$labels <- merge(ddata$labels, meta.x, by.x="label", by.y="row.names")
+  ddata$labels <- merge(ddata$labels, meta.x, by.x="label", by.y="shortname")
 p2 <- ggplot(segment(ddata)) +
     geom_segment(aes(x=x, y=y, xend=xend, yend=yend)) +
     theme_dendro() +
@@ -139,7 +142,7 @@ p2 <- ggplot(segment(ddata)) +
 grid.arrange(p1, p2, ncol=2)
 ```
 
-## DESeq2: Finding genes differentially expressed between WT and KO
+### DESeq2: Finding genes differentially expressed between WT and KO
 
 Starting from count data; create a DESeq object. The design formula (~) is used to estimate the dispersions and to estimate the log2 fold changes of the model. DESeq2 will estimate the library sizes with "estimateSizeFactors". However, this can only take into account tags that have contributed to your cluster definitions (genes). Imagine that none of your clusters are differentially expressed, but due to some biological or technical artifact, the reads that do not map to clusters are more abundant in one than in the other sample. A normalization based on all counts will skew the clusters in order to account for the non-clusters. Finally, There are three levels of filtering applied in DESeq2.
 
@@ -189,15 +192,15 @@ grid.arrange(p1, p2, ncol=2)
 
 ```
 
-## Significant genes
+### Significant genes
 The p-value distributions indicate that there is probabaly little to no DE with the B16 cells (based on the almost uniform distribution), but there might be something in the MC38 comparison. Significant genes were identified from each comaprison using the threshold of padj < 0.05 and an absolute FC > 2. For B16 cells only four genes passed this threshold, and for MC38 cells no significant genes were found. A less stringent alternative is to see how many genes are found using the adjusted p-value criteria on its own (p < 0.05). With this we find 8 genes differntially expressed in B16 cells and 489 genes in the MC38 cells.
 
-The following genes lists resulted with no overlap between the two. Gene lists are provided in the links below with Ensembl ID, Gene symbol and RPKM values in each sample.                            
+There was no overlap found between the two. Gene lists are provided in the links below with Ensembl ID, Gene symbol and RPKM values in each sample. The eight genes from B16 are displayed in the table below.                            
 
-  * Group 1: [B16 comparison](./results/resultsB16)  
-  * Group 2: [MC38 comparison](./results/resultsMC38)
+  * Group 1: [B16 comparison](./results/resultsB16.csv)  
+  * Group 2: [MC38 comparison](./results/resultsMC38.csv)
 
-```{r siggenes, fig.align='center', echo=FALSE}
+```{r siggenes, fig.align='center', echo=FALSE, eval=FALSE}
 # Get significant genes from each comparison
 resultsAll <- list(resB16, resMC38)
 p.cutoff <- 0.05
@@ -208,4 +211,23 @@ sigmat <- lapply(resultsAll, function(x){
             gene.FDR <- row.names(getGenes)[which(getGenes$padj < p.cutoff)]
             return(gene.FDR)})
 
+# get gene lists
+fpkm <- read.delim(file.path(dataDir, "combined.fpkm"), header=T, sep="\t", row.names=1)
+out <- fpkm[sigmat[[2]],]
+cols <- c("GeneSymbol", meta[colnames(out), 'shortname'])
+an.out <- match(sigmat[[2]], row.names(annot))
+out <- cbind(annot$symbol[an.out], out)
+names(out) <- cols
+write.table(out, "results/reusltsMC38.csv", sep=",", quote=F)
+
 ```
+
+```{r B16-table, echo=FALSE, fig.align='center'}
+
+out <- data.frame(resB16[sigmat[[1]],])
+an.out <- match(sigmat[[1]], row.names(annot))
+out <- cbind(annot$symbol[an.out], out)
+colnames(out)[1] <- "geneSymbol"
+kable(out, format='html')
+```
+
