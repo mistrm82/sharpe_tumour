@@ -1,0 +1,225 @@
+---
+title: "Sharpe lab - Tumour RNASeq"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_depth: 4
+    fig_caption: true
+    fig_width: 8
+    fig_height: 6
+author: "Meeta Mistry"
+---
+
+```{r setup, echo=FALSE}
+ 
+# Setup report details
+clientname="Vikram Juneja"
+clientemail="vikram.juneja@gmail.com "
+lablocation="Sharpe Lab- HMS"
+analystname="Meeta Mistry"
+analystemail="mmistry@hsph.harvard.edu"
+```
+
+RNA-Seq analysis for `r clientname` (`r clientemail`) at `r lablocation`. Contact `r analystname` (`r analystemail`) for additional details. Request from client was:     
+
+Looking at PD1-sensitive (MC38) versus PD1-insensitive (B16): What pathways may compensate for the loss of PD-1/PD-L1 signaling in PD-1 -/- mice? What pathways do PD-1 insensitive tumor cells take advantage of?                                                 
+
+  * Group 1: WT versus PD-1-/- (MC38) (triplicate)
+  * Group 2: WT versus PD-1-/- (B16) (triplicate)
+  * Group 3: MC38 in vitro (triplicate)
+  * Group 4: B16 in vitro (triplicate)
+  
+Originally, we looked at differences betwen WT and KO [within each celltype](./sharpe_tumour.html). Here we found that at a fairly liberal FDR of 0.05 and fold change cutoff of 2, the MC38 cell line had no significant genes and B16 with only four genes. Given we also have in vitro data, we can try modeling the data differently to answer the same biological question. 
+
+We can setup the contrasts such that we extract:   
+
+1. Genes that are up-regulated in B16 compared to MC38 (presumably WT and KO can be combined since the differences are negligible)
+2. Genes that are up-regulated in B16 in vivo compared to invitro 
+3. Genes that are up in B16 invivo compared to MC38 invitro
+ 
+Essentially we are looking for the genes up in B16 in vivo compared to everything else. We would expect to see the lowest expression of these genes in MC38 invitro (this can be checked via visualization)
+  
+## Setup
+### Bioconductor and R libraries used
+
+```{r libraries, echo=TRUE}
+loadlibs <- function(){
+library(ggplot2)
+library(RColorBrewer)
+library(CHBUtils)
+library(grid)
+library(gridExtra)
+library(limma)
+library(DESeq2)
+library(CHBUtils)
+library(Biobase)
+}
+suppressPackageStartupMessages(loadlibs())
+```
+
+### Set variables
+```{r directories, echo=TRUE}
+baseDir=getwd()
+dataDir=paste(baseDir, "/data", sep="")
+resultsDir=paste(baseDir, "/results", sep="")
+metaDir=paste(baseDir, "/meta", sep="")
+
+heatcolors.1 <- brewer.pal(6, "YlOrRd")
+heatcolors.2 <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+cbPalette <- c("blue", "pink", "darkgreen", "purple")
+```
+  
+## RNA-Seq
+### Load data
+
+```{r loadcounts}
+data <- read.delim(file.path(dataDir, 'combined.counts'), header=T, sep="\t", row.names=1, as.is=T) 
+meta <- read.delim(file.path(metaDir, 'project2.csv'), header=T, sep=",", row.names=1)
+meta$sampletype <- factor(paste(meta$celline, "_", meta$genotype, sep=""))
+shortname = sapply(row.names(meta), function(x){
+                  s <- unlist(strsplit(x, "_"))
+                  newname <- paste(s[5], "_", s[6], sep="")}, USE.NAMES=F)
+meta$shortname <-shortname
+
+# Reorder data to match meta
+ord.names <- sapply(rownames(meta), function(x){
+                            s <- strsplit(x, ".", fixed=T)[[1]][1] 
+                            grep(s, colnames(data))})
+
+data <- data[,as.numeric(ord.names)]
+colnames(data) <- row.names(meta)
+
+# Create eset object
+eset <- new("ExpressionSet", exprs=as.matrix(data))
+pData(eset) <- meta
+annot <- read.delim(file.path(dataDir, 'annotated_combined.counts'), sep="\t", header=T, row.names=1)
+fData(eset) <- data.frame(symbol=annot$symbol, row.names=row.names(annot), stringsAsFactors = FALSE)
+```
+
+### Idenitfy expression changes in B16 cells (ex vivo versus in vitro)
+First let's see if there are invivo versus invitro differences in B16, and whether that changes whether we add/remove KO samples. Presumably, adding KO will add statistical power but will also add noise.
+
+```{r B16-comparison, warning=FALSE, message=FALSE,error=FALSE}
+
+# Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(countData = exprs(eset), colData = pData(eset), design = ~ sampletype)
+dds <- DESeq(dds)
+
+# Matrix of pseudocounts for downstream visualization: two methods
+rld <- rlog(dds)
+
+# Extract data of specified contrasts for B16
+# resultNames(dds) # uncomment to check names for contrast setup
+contrast <- list("sampletypeB16.GFP_ctl", "sampletypeB16.GFP_WT")
+resB16WT <- results(dds, contrast=contrast)
+
+contrast <- list("sampletypeB16.GFP_ctl", c("sampletypeB16.GFP_WT", "sampletypeB16.GFP_KO"))
+resB16all <- results(dds, contrast=contrast)
+
+contrast <- list("sampletypeB16.GFP_ctl", "sampletypeB16.GFP_KO")
+resB16KO <- results(dds, contrast=contrast)
+
+# Identify significant genes
+p.cutoff <- 0.05
+fc.cutoff <- 2
+resB16all$threshold <- as.logical(resB16all$padj < p.cutoff & abs(resB16all$log2FoldChange) > 2 )
+resB16KO$threshold <- as.logical(resB16KO$padj < p.cutoff & abs(resB16KO$log2FoldChange) > 2 )
+resB16WT$threshold <- as.logical(resB16WT$padj < p.cutoff & abs(resB16WT$log2FoldChange) > 2 )
+```
+
+At a threshold of **adjusted p-value < 0.05 and fold change > 2** we tabulated the number of significant genes for each comparison. The results are listed below:
+
+* B16 in vitro versus B16 exvivo (KO + WT): `length(which(resB16all$threshold))` genes
+* B16 in vitro versus B16 exvivo WT: `length(which(resB16WT$threshold))` genes
+* B16 in vitro versus B16 ex vivo KO: `length(which(resB16KO$threshold))` genes
+
+**Between the KO only and WT only comparisons we see that ~60% of genes overlap**. That is not surprising considering we didn't observe much of a difference between WT and KO in our previous comparison. If the two are quite similar, the way in which they differ from the invitro B16 cells would be similar. Combining the WT+KO however, we find that ~500 extra genes are being dysregulated likely due to noise. Unfortunatley, because we don't have KO samples for the in vitro samples we cannot control for it in our model; as in the design formula the two factors become linear combinations of each other. We can move forward with genes from the WT only comparison.
+
+```{r venny, fig.align='center', echo=FALSE, warning=FALSE, message=FALSE}
+require(png)
+require(gridExtra)
+img <- readPNG("figures//vennB16.png")
+grid.raster(img)
+```
+
+From the list of significant genes changing in expression we are only interested in **221 genes that are up-regulated B16 ex vivo compared to the in vitro cells**. The heatmap provided below displays the expression differences for these genes, with columns under the blue bar representing B16 invitro and the green bar representing B16 exvivo. The columns under the pink bar represent the B16 exvivo KO samples to ilustrate that **those genes also show increased expression compared to in vitro in the knockout**. 
+
+```{r heatmap, echo=FALSE, fig.align='center', fig.height=12, fig.width=9}
+# get expression data for genes
+select_row <- row.names(resB16WT)[which(resB16WT$log2FoldChange < 0 & resB16WT$threshold)]
+select_col  <- row.names(meta)[which(meta$celline == "B16-GFP")]
+sub.eset <- eset[select_row, select_col]
+
+# Use normalized expression for visualization
+exprs(sub.eset) <- rlogmat[select_row, select_col]
+
+# plot heatmap
+heatmap.2(exprs(sub.eset), scale="row", col=heatcolors.1, margins=c(5,10), srtCol=45,
+          labRow=fData(sub.eset)$symbol, Colv=FALSE, Rowv=FALSE, labCol=pData(sub.eset)$shortname,
+          ColSideColors=cbPalette[pData(sub.eset)$genotype], trace="none", dendrogram="none")
+
+```
+
+### Identify celltype specific changes in the KO models
+The next step is to identify expression changes when comparing the B16KO and the MC38 KO cells. The hypothesis here is that perhaps genes that are up-regulated in B16 compared to MC38 are the same genes that are constitutively expressed in B16 exvivo and represent the compensating mechanism in play.
+
+```{r KO-comparison, warning=FALSE, message=FALSE,error=FALSE}
+
+# Extract data of specified contrasts
+contrast <- list("sampletypeMC38.GFP_KO", "sampletypeB16.GFP_KO")
+resKO <- results(dds, contrast=contrast)
+
+# Extract data of specified contrasts
+contrast <- list("sampletypeMC38.GFP_KO", "sampletypeB16.GFP_WT")
+resWT <- results(dds, contrast=contrast)
+
+# Identify significant genes
+resKO$threshold <- as.logical(resKO$padj < p.cutoff & abs(resKO$log2FoldChange) > 2 )
+resWT$threshold <- as.logical(resWT$padj < p.cutoff & abs(resWT$log2FoldChange) > 2 )
+```
+
+Using the same threshold criteria as the previous comparisons, we identify a total of **1767 significant genes**. If we take only the **619 genes up-regulated in B16** and plot a heatmap using all samples we see that these genes are up-regulated in B16cells in general compared to MC38 samples. _Moreover, there are a large subset of these genes that also show slightly higher expression in the B16 exvivo compared to invitro_. Also, note that the exact same genes appear if we compare MC38-KO to the B16-WT samples. 
+
+```{r heatmap, echo=FALSE, fig.align='center', fig.height=12, fig.width=9}
+
+# get expression data for genes
+select_row <- row.names(resKO)[which(resKO$log2FoldChange < 0 & resKO$threshold)]
+select_col  <- row.names(meta)[which(meta$sampletype == "B16-GFP_KO" | meta$sampletype == "MC38-GFP_KO")]
+sub.eset <- eset[select_row, select_col]
+pData(sub.eset) <- droplevels(pData(sub.eset))
+
+# Use normalized expression for visualization
+exprs(sub.eset) <- rlogmat[select_row, select_col]
+
+# plot heatmap
+heatmap.2(exprs(sub.eset), scale="row", col=heatcolors.1, margins=c(5,10), srtCol=45,
+          labRow=NA, Colv=FALSE, Rowv=FALSE, labCol=pData(sub.eset)$shortname,
+          ColSideColors=cbPalette[pData(sub.eset)$sampletype], trace="none", dendrogram="none")
+
+```
+  
+## Overlap in up-regulated genes
+Between the two sets of genes up-regulated in B16, we find 70 genes overlap. These are genes that are up-regulated in B16-exvivo samples compared to _both_ B16 invitro and MC38 cells (in vitro, WT and KO). These are genes that are possibly contributing to the compensation which occurs in B16 cells making them insensitive to the PD1 knockout. 
+
+```{r overlap, echo=FALSE, fig.align='center', fig.height=12, fig.width=9}
+
+# Get overlaps
+B16genes <- row.names(resB16WT)[which(resB16WT$log2FoldChange < 0 & resB16WT$threshold)]
+MC38genes <- row.names(resKO)[which(resKO$log2FoldChange < 0 & resKO$threshold)]
+overlap <- B16genes[which(B16genes %in% MC38genes)]
+
+# get expression data for genes
+sub.eset <- eset[overlap,]
+
+# Use normalized expression for visualization
+exprs(sub.eset) <- rlogmat[overlap,]
+
+# plot heatmap
+heatmap.2(exprs(sub.eset), scale="row", col=heatcolors.1, margins=c(5,10), srtCol=45,
+          labRow=fData(sub.eset)$symbol, Colv=FALSE, Rowv=FALSE, labCol=pData(sub.eset)$shortname,
+          ColSideColors=cbPalette[pData(sub.eset)$sampletype], trace="none", dendrogram="none")
+
+```
+
+  
